@@ -3,5 +3,5 @@
   "filename": "cat-feeder-schedule-card.js",
   "content_in_root": true,
   "render_readme": true,
-  "homeassistant": "2024.1.0"
+  "homeassistant": "2025.8.0"
 }
