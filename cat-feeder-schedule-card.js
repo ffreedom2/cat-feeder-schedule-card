@@ -1,6 +1,6 @@
-/* Cat Feeder Schedule Card (no-build JS)
+/* Cat Feeder Schedule Card (no-build JS) — v0.1.3
+   Fix: removed recursive getStubConfig causing "Maximum call stack size exceeded"
    Aqara ZNCWWSQ01LM (Pet Feeder C1) via Zigbee2MQTT
-   HACS-friendly single-file build: place at repo root as `cat-feeder-schedule-card.js`
 */
 (function(){
   const DAY_PATTERNS = ["everyday","workdays","weekend","mon","tue","wed","thu","fri","sat","sun","mon-wed-fri-sun","tue-thu-sat"];
@@ -22,26 +22,27 @@
     return s==='true' || s==='on' || s==='1' || s==='error';
   }
 
+  const DEFAULTS = {
+    title: 'Cat Feeder Schedule',
+    mqtt_topic: 'zigbee2mqtt/your_feeder/set',
+    schedule_key: 'schedule',
+    schedule_entity: '',
+    status_entity: '',
+    default_size: 1,
+    show_serving_size: true,
+    show_portion_weight: true,
+    serving_size: null,
+    portion_weight: null,
+    manual_command_key: 'feed',
+    mode: 'schedule',
+    schedule: [],
+  };
+
   class CatFeederScheduleCard extends HTMLElement {
-    static getStubConfig(){
-      return {
-        title: 'Cat Feeder Schedule',
-        mqtt_topic: 'zigbee2mqtt/your_feeder/set',
-        schedule_key: 'schedule',
-        schedule_entity: '',
-        status_entity: '',
-        default_size: 1,
-        show_serving_size: true,
-        show_portion_weight: true,
-        serving_size: null,
-        portion_weight: null,
-        manual_command_key: 'feed',
-        mode: 'schedule',
-        schedule: [],
-      };
-    }
+    static getStubConfig(){ return { ...DEFAULTS }; }
+
     setConfig(config){
-      this._config = Object.assign({}, CatFeederScheduleCard.getStubConfig(), config||{});
+      this._config = Object.assign({}, DEFAULTS, config||{});
       if(!this._config.mqtt_topic) throw new Error("'mqtt_topic' is required");
       this._state = {
         rows: this._normalizeRows(this._config.schedule),
@@ -308,13 +309,12 @@
 
     // Config editor support
     static getConfigElement(){ return document.createElement('cat-feeder-schedule-card-editor'); }
-    static getStubConfig(){ return CatFeederScheduleCard.getStubConfig(); }
   }
   customElements.define('cat-feeder-schedule-card', CatFeederScheduleCard);
 
-  // Config editor element (simple, no-build)
+  // Simple Config Editor (guards added)
   class CatFeederScheduleCardEditor extends HTMLElement{
-    setConfig(config){ this._config = Object.assign({}, CatFeederScheduleCard.getStubConfig(), config||{}); this._render(); }
+    setConfig(config){ this._config = Object.assign({}, DEFAULTS, config||{}); this._render(); }
     set hass(hass){ this._hass=hass; }
     _render(){
       if(!this.shadowRoot) this.attachShadow({mode:'open'});
@@ -346,10 +346,11 @@
           </select></label>
         </div>
       `;
-      const ids = ['showsize','showpw'];
-      ids.forEach(id=> this.shadowRoot.getElementById(id).addEventListener('change', ()=> this._emit()));
-      // Attach change listeners for inputs
-      this.shadowRoot.querySelectorAll('input').forEach((el)=> el.addEventListener('change', ()=> this._emit()));
+      const wrap = this.shadowRoot.querySelector('.wrap');
+      if(!wrap) return;
+      wrap.querySelectorAll('input').forEach((el)=> el.addEventListener('change', ()=> this._emit()));
+      const ss = this.shadowRoot.getElementById('showsize'); if (ss) ss.addEventListener('change', ()=> this._emit());
+      const spw = this.shadowRoot.getElementById('showpw'); if (spw) spw.addEventListener('change', ()=> this._emit());
     }
     _field(label,key,val,placeholder='',required=false,type='text',range){
       return `<label class="${key==='title'||key==='mqtt_topic'?'full':''}">${label}
@@ -357,15 +358,17 @@
       </label>`;
     }
     _emit(){
+      if(!this.shadowRoot) return;
       const cfg = {...(this._config||{})};
       this.shadowRoot.querySelectorAll('input').forEach((el)=>{
         const k = el.getAttribute('data-key');
+        if(!k) return;
         let v = el.getAttribute('type')==='number' ? Number(el.value||0) : el.value;
         if(k==='serving_size' || k==='portion_weight'){ if(el.value==='') v = null; }
         cfg[k] = v;
       });
-      cfg.show_serving_size = this.shadowRoot.getElementById('showsize').value==='true';
-      cfg.show_portion_weight = this.shadowRoot.getElementById('showpw').value==='true';
+      const ss = this.shadowRoot.getElementById('showsize'); if (ss) cfg.show_serving_size = ss.value==='true';
+      const spw = this.shadowRoot.getElementById('showpw'); if (spw) cfg.show_portion_weight = spw.value==='true';
       this._config = cfg;
       this.dispatchEvent(new CustomEvent('config-changed',{ detail: { config: cfg }, bubbles:true, composed:true }));
     }
