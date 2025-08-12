@@ -27,3 +27,17 @@ Schedule rows map to:
 { "schedule": [ { "days": "workdays", "hour": 8, "minute": 0, "size": 2 } ] }
 ```
 Optionally include `serving_size` and `portion_weight`.
+
+
+## HACS compliance notes
+HACS expects the built JS at the **repository root** or as a release asset matching `hacs.json.filename`.
+This repo ships a workflow that, on tag `v*.*.*`, builds and copies `dist/cat-feeder-schedule-card.js` to the root as `cat-feeder-schedule-card.js` and attaches it to the GitHub release.
+
+If building locally for a release:
+```bash
+npm run build:release
+git add cat-feeder-schedule-card.js
+git commit -m "chore: include built file for HACS"
+git tag v0.1.1
+git push --tags
+```

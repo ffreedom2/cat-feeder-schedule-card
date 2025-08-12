@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:release": "vite build && cp dist/cat-feeder-schedule-card.js ./cat-feeder-schedule-card.js"
   },
   "devDependencies": {
     "typescript": "^5.4.0",
