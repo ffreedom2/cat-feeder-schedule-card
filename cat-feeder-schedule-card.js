@@ -1,10 +1,8 @@
-/* Cat Feeder Schedule Card — Mealplan-style v0.2.0
-   Aqara ZNCWWSQ01LM via Zigbee2MQTT
-   Goals:
-   - Looks & flow similar to https://github.com/FredrikM97/mealplan-card
-   - Minimal config: mqtt_topic (required), schedule_entity (optional), schedule_key (default 'schedule')
-   - Loads schedule on init (if schedule_entity provided)
-   - Converts local time -> UTC before publishing; converts UTC -> local when loading (config flags)
+/* Cat Feeder Mealplan-style — v0.2.1
+   Changes:
+   - Auto-loads schedule on card load (no button)
+   - Live-loads whenever schedule_entity state changes
+   - Robust parsing from attribute or state; UTC<->local conversion
 */
 (function(){
   const DAY_PATTERNS = ["everyday","workdays","weekend","mon","tue","wed","thu","fri","sat","sun","mon-wed-fri-sun","tue-thu-sat"];
@@ -25,26 +23,14 @@
 
   // Convert {hour,minute} in LOCAL to UTC hour/minute, using browser TZ
   function localHMtoUTC({hour, minute}){
-    const d = new Date();
-    d.setHours(hour, minute, 0, 0);
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
     return { hour: d.getUTCHours(), minute: d.getUTCMinutes() };
   }
   // Convert {hour,minute} in UTC to LOCAL hour/minute
   function utcHMtoLocal({hour, minute}){
     const d = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate(), hour, minute, 0, 0));
     return { hour: d.getHours(), minute: d.getMinutes() };
-  }
-
-  function expandPattern(pattern){
-    const p = String(pattern||'workdays').toLowerCase();
-    switch(p){
-      case 'everyday': return DAYS;
-      case 'workdays': return ['mon','tue','wed','thu','fri'];
-      case 'weekend': return ['sat','sun'];
-      case 'mon-wed-fri-sun': return ['mon','wed','fri','sun'];
-      case 'tue-thu-sat': return ['tue','thu','sat'];
-      default: return DAYS.includes(p) ? [p] : ['mon','tue','wed','thu','fri'];
-    }
   }
 
   class MealplanStyleFeederCard extends HTMLElement {
@@ -55,27 +41,28 @@
       if(!this._config.mqtt_topic) throw new Error("'mqtt_topic' is required");
       this._state = {
         rows: [],
-        loading: false,
         saving: false,
         msg: null,
         err: null,
         loadedOnce: false,
       };
+      this._lastEntityFingerprint = null;
       if(this._root) this._render();
     }
 
     set hass(hass){
+      const prev = this._hass;
       this._hass = hass;
       if(!this._root){
         this._root = this.attachShadow({mode:'open'});
         this._injectStyles();
         this._render();
-        // auto-load on first attach if entity provided
-        if(this._config.schedule_entity) this._loadCurrent(true);
       }
+      // Auto-load on first hass bind and whenever the schedule_entity changes value
+      this._maybeLoadFromEntity();
     }
 
-    getCardSize(){ return 8; }
+    getCardSize(){ return 6; }
 
     // ---------- Styles (Mealplan-ish) ----------
     _injectStyles(){
@@ -86,7 +73,6 @@
         .header{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
         .title{ margin:0; font: 600 20px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
         .sub{ color: var(--secondary-text-color); font-size:.9rem; }
-        .pill{ border:1px solid var(--divider-color); border-radius:999px; padding:4px 10px; }
         .toolbar{ display:flex; gap:8px; align-items:center; }
         .rows{ display:flex; flex-direction:column; gap:12px; margin-top:12px; }
         .row{ border:1px solid var(--divider-color); border-radius:12px; padding:12px; display:grid; grid-template-columns: 1.1fr 0.7fr 0.6fr auto; gap:10px; align-items:center; }
@@ -122,19 +108,17 @@
       const sub = document.createElement('div'); sub.className='sub'; sub.textContent = this._config.convert_times_to_utc ? 'Times are saved as UTC' : 'Times are saved as local';
       hleft.append(title, sub);
       const tools = document.createElement('div'); tools.className='toolbar';
-      const loadBtn = this._btn('ghost', this._state.loading? 'Loading…':'Load current', ()=> this._loadCurrent());
-      loadBtn.disabled = !this._config.schedule_entity || this._state.loading;
       const addBtn = this._btn('ghost','+ Add', ()=> this._addRow());
       const saveBtn = this._btn('primary', this._state.saving? 'Saving…':'Save', ()=> this._save());
       saveBtn.disabled = this._state.saving || this._state.rows.length===0;
-      tools.append(loadBtn, addBtn, saveBtn);
+      tools.append(addBtn, saveBtn);
       header.append(hleft, tools);
       wrap.appendChild(header);
 
       // Existing schedule (overview chips)
       const overview = document.createElement('div'); overview.className='list';
       if(!this._state.rows.length){
-        overview.appendChild(this._el('div',{className:'hint'}, this._state.loadedOnce ? 'No schedule.' : 'Click "Load current" to fetch schedule, or add rows.'));
+        overview.appendChild(this._el('div',{className:'hint'}, this._state.loadedOnce ? 'No schedule.' : (this._config.schedule_entity? 'Loading…' : 'Add rows to create a schedule.')));
       } else {
         // group by pattern for quick glance
         const groups = {};
@@ -191,45 +175,47 @@
       return el;
     }
 
-    // ---------- Data ----------
-    _normalizeRows(arr){
-      if(!Array.isArray(arr)) return [];
-      return arr.map(r=>({ pattern: sanitizePattern(r.days||r.pattern||'workdays'),
-                           hour: clampInt(r.hour??8,0,23),
-                           minute: clampInt(r.minute??0,0,59),
-                           size: clampInt(r.size??this._config.default_size??1,1,20)}));
+    // ---------- Entity loading ----------
+    _maybeLoadFromEntity(){
+      try{
+        const ent = this._config.schedule_entity;
+        if(!ent || !this._hass || !this._hass.states) return;
+        const st = this._hass.states[ent];
+        if(!st) return; // entity not ready yet
+        const fingerprint = JSON.stringify({s: st.state, a: st.attributes});
+        if (this._lastEntityFingerprint === fingerprint && this._state.loadedOnce) return; // no change
+        // parse schedule
+        const rows = this._parseScheduleFromState(st);
+        if(rows){ this._state.rows = rows; this._state.loadedOnce = true; this._msg(null); this._render(); }
+        this._lastEntityFingerprint = fingerprint;
+      }catch(e){ /* swallow; avoid re-render loops */ }
     }
 
+    _parseScheduleFromState(st){
+      const key = this._config.schedule_key || 'schedule';
+      let raw = st?.attributes?.[key];
+      let parsed;
+      if(raw==null){
+        // try parsing state if it looks like JSON
+        try{ parsed = JSON.parse(st.state); } catch{ parsed = null; }
+        if(parsed && typeof parsed==='object'){ raw = parsed[key] ?? parsed; }
+      }
+      let arr = Array.isArray(raw) ? raw : (Array.isArray(parsed)? parsed : null);
+      if(!Array.isArray(arr)) return null;
+      let rows = arr.map(r=>({ pattern: sanitizePattern(r.days||r.pattern||'workdays'),
+                               hour: clampInt(r.hour??8,0,23),
+                               minute: clampInt(r.minute??0,0,59),
+                               size: clampInt(r.size??this._config.default_size??1,1,20)}));
+      if(this._config.schedule_times_are_utc){
+        rows = rows.map(r=>{ const hm = utcHMtoLocal({hour:r.hour, minute:r.minute}); return {...r, hour: hm.hour, minute: hm.minute}; });
+      }
+      return rows;
+    }
+
+    // ---------- Data ----------
     _patchRow(idx, patch){ const next=[...this._state.rows]; next[idx] = Object.assign({}, next[idx], patch); this._state.rows=next; this._msg(null); this._render(); }
     _addRow(){ this._state.rows=[...this._state.rows, { pattern:'workdays', hour:8, minute:0, size:this._config.default_size||1 }]; this._render(); }
     _removeRow(idx){ this._state.rows = this._state.rows.filter((_,i)=>i!==idx); this._render(); }
-
-    async _loadCurrent(initial=false){
-      if(!this._config.schedule_entity || !this._hass) return;
-      try{
-        this._state.loading=true; this._state.err=null; if(!initial) this._state.msg=null; this._render();
-        const st = this._hass.states[this._config.schedule_entity];
-        if(!st){ throw new Error(`Entity not found: ${this._config.schedule_entity}`); }
-        // Prefer attribute key, fallback to entire state (JSON string)
-        let raw = st.attributes?.[this._config.schedule_key];
-        if(!raw){ raw = st.state; }
-        let parsed;
-        if(typeof raw === 'string'){
-          try{ parsed = JSON.parse(raw); } catch{ parsed = {}; }
-        } else { parsed = raw || {}; }
-        let arr = parsed?.[this._config.schedule_key];
-        if(!Array.isArray(arr)) arr = Array.isArray(parsed)? parsed : [];
-        let rows = this._normalizeRows(arr);
-        // If schedule is stored as UTC, convert to local for the editor
-        if(this._config.schedule_times_are_utc){
-          rows = rows.map(r=>{ const {hour,minute} = utcHMtoLocal({hour:r.hour, minute:r.minute}); return {...r, hour, minute}; });
-        }
-        this._state.rows = rows;
-        this._state.loadedOnce = true;
-        this._msg('Loaded current schedule.');
-      }catch(e){ this._err(e.message||String(e)); }
-      finally{ this._state.loading=false; this._render(); }
-    }
 
     _buildPayload(){
       const key = this._config.schedule_key || 'schedule';
@@ -238,7 +224,6 @@
                                                  hour: clampInt(r.hour,0,23),
                                                  minute: clampInt(r.minute,0,59),
                                                  size: clampInt(r.size,1,20)}));
-      // Convert to UTC if configured
       const rows = this._config.convert_times_to_utc
         ? rowsRaw.map(r=>{ const hm = localHMtoUTC({hour:r.hour, minute:r.minute}); return {...r, hour: hm.hour, minute: hm.minute}; })
         : rowsRaw;
@@ -269,7 +254,7 @@
 
   customElements.define('cat-feeder-mealplan-card', MealplanStyleFeederCard);
 
-  // Minimal editor to keep GUI flow simple
+  // Minimal editor (no load button config)
   class MealplanFeederEditor extends HTMLElement{
     setConfig(config){ this._config = Object.assign({}, DEFAULTS, config||{}); this._render(); }
     set hass(hass){ this._hass=hass; }
