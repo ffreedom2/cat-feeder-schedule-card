@@ -1,8 +1,11 @@
-/* Cat Feeder Mealplan-style — v0.2.1
+/* Cat Feeder Mealplan-style — v0.2.2
    Changes:
-   - Auto-loads schedule on card load (no button)
-   - Live-loads whenever schedule_entity state changes
-   - Robust parsing from attribute or state; UTC<->local conversion
+   - Auto-loads schedule on card load and on entity changes
+   - Robust parsing:
+       * attributes[schedule_key] if present
+       * else try JSON.parse(state)
+       * else convert Python-style single-quoted list/dict in state -> JSON and parse
+   - UTC<->local conversion preserved
 */
 (function(){
   const DAY_PATTERNS = ["everyday","workdays","weekend","mon","tue","wed","thu","fri","sat","sun","mon-wed-fri-sun","tue-thu-sat"];
@@ -33,6 +36,26 @@
     return { hour: d.getHours(), minute: d.getMinutes() };
   }
 
+  function tryParseJSONish(input){
+    if(typeof input!=='string') return null;
+    // First try JSON.parse as-is
+    try{ return JSON.parse(input); }catch{}
+    // Convert Python-style single quotes and dict/list into JSON
+    // - Replace single quotes with double quotes for simple strings/keys
+    // - Ensure true/false/null variants if present (not typical here)
+    let s = input.trim();
+    // Quick sanity: should start with [ or { and contain quotes
+    if(!(s.startsWith('[') || s.startsWith('{'))) return null;
+    // Replace single quotes around keys/strings with double quotes.
+    // This is a heuristic that works for the feeder schedule shapes.
+    s = s
+      .replace(/'/g, '"')                // single -> double quotes
+      .replace(/\bNone\b/g, 'null')      // Python None -> null
+      .replace(/\bTrue\b/g, 'true')      // Python True -> true
+      .replace(/\bFalse\b/g, 'false');   // Python False -> false
+    try{ return JSON.parse(s); }catch{ return null; }
+  }
+
   class MealplanStyleFeederCard extends HTMLElement {
     static getStubConfig(){ return { ...DEFAULTS, title: 'Cat Feeder (Mealplan)' }; }
 
@@ -51,7 +74,6 @@
     }
 
     set hass(hass){
-      const prev = this._hass;
       this._hass = hass;
       if(!this._root){
         this._root = this.attachShadow({mode:'open'});
@@ -78,7 +100,6 @@
         .row{ border:1px solid var(--divider-color); border-radius:12px; padding:12px; display:grid; grid-template-columns: 1.1fr 0.7fr 0.6fr auto; gap:10px; align-items:center; }
         .row select, .row input{ width:100%; padding:8px 10px; border-radius:10px; border:1px solid var(--divider-color); background: var(--card-background-color); }
         .row .remove{ justify-self:end; }
-        .actions{ display:flex; gap:8px; justify-content:flex-end; margin-top:10px; }
         .btn{ border:none; border-radius:10px; padding:8px 12px; cursor:pointer; font:inherit; }
         .btn.primary{ background: var(--primary-color); color:#fff; }
         .btn.ghost{ background: transparent; color: var(--primary-color); border:1px solid var(--primary-color); }
@@ -193,15 +214,26 @@
 
     _parseScheduleFromState(st){
       const key = this._config.schedule_key || 'schedule';
-      let raw = st?.attributes?.[key];
-      let parsed;
-      if(raw==null){
-        // try parsing state if it looks like JSON
-        try{ parsed = JSON.parse(st.state); } catch{ parsed = null; }
-        if(parsed && typeof parsed==='object'){ raw = parsed[key] ?? parsed; }
+      let fromAttr = st?.attributes?.[key];
+      if (Array.isArray(fromAttr)) {
+        return this._postProcessRows(fromAttr);
       }
-      let arr = Array.isArray(raw) ? raw : (Array.isArray(parsed)? parsed : null);
-      if(!Array.isArray(arr)) return null;
+      // try JSON from state
+      let parsed = tryParseJSONish(st.state);
+      if(parsed && typeof parsed==='object'){
+        let raw = parsed[key] ?? parsed;
+        if (Array.isArray(raw)) return this._postProcessRows(raw);
+      }
+      // If attribute is a string JSON-ish, try parse too
+      if(typeof fromAttr === 'string'){
+        parsed = tryParseJSONish(fromAttr);
+        if(parsed && Array.isArray(parsed)) return this._postProcessRows(parsed);
+        if(parsed && typeof parsed==='object' && Array.isArray(parsed[key])) return this._postProcessRows(parsed[key]);
+      }
+      return null;
+    }
+
+    _postProcessRows(arr){
       let rows = arr.map(r=>({ pattern: sanitizePattern(r.days||r.pattern||'workdays'),
                                hour: clampInt(r.hour??8,0,23),
                                minute: clampInt(r.minute??0,0,59),
@@ -254,7 +286,7 @@
 
   customElements.define('cat-feeder-mealplan-card', MealplanStyleFeederCard);
 
-  // Minimal editor (no load button config)
+  // Minimal editor (unchanged)
   class MealplanFeederEditor extends HTMLElement{
     setConfig(config){ this._config = Object.assign({}, DEFAULTS, config||{}); this._render(); }
     set hass(hass){ this._hass=hass; }
@@ -263,7 +295,7 @@
       const c = this._config||{};
       this.shadowRoot.innerHTML = `
         <style>
-          .wrap{ display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+          .wrap{ display:grid; grid-template-columns: 1.2fr 1fr; gap:12px; }
           label{ display:flex; flex-direction:column; gap:6px; font-size:.9rem; }
           input, select{ padding:8px 10px; border-radius:10px; border:1px solid var(--divider-color); background: var(--card-background-color); }
           .full{ grid-column: 1/-1; }
