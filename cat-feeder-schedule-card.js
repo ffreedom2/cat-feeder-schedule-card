@@ -1,58 +1,33 @@
-/* Cat Feeder Mealplan-style — v0.2.2
-   Changes:
-   - Auto-loads schedule on card load and on entity changes
-   - Robust parsing:
-       * attributes[schedule_key] if present
-       * else try JSON.parse(state)
-       * else convert Python-style single-quoted list/dict in state -> JSON and parse
-   - UTC<->local conversion preserved
+/* Cat Feeder Mealplan-style — v0.2.3
+   Changes requested:
+   - Remove all UTC conversion (device now uses local time)
+   - Remove subtitle ("Times are saved as UTC") and summary chips
+   - Dropdown options no longer uppercased
+   - Inputs styled to match Lovelace look & feel
 */
 (function(){
   const DAY_PATTERNS = ["everyday","workdays","weekend","mon","tue","wed","thu","fri","sat","sun","mon-wed-fri-sun","tue-thu-sat"];
-  const DAYS = ["mon","tue","wed","thu","fri","sat","sun"];
-
   const DEFAULTS = {
     title: 'Cat Feeder Schedule',
     mqtt_topic: '',
     schedule_entity: '',
     schedule_key: 'schedule',
-    convert_times_to_utc: true,   // when publishing
-    schedule_times_are_utc: true, // interpret loaded schedule as UTC -> convert to local for display
     default_size: 1,
   };
 
   function clampInt(v, min, max){ v=Math.round(Number(v)); if(!Number.isFinite(v)) v=min; return Math.max(min, Math.min(max, v)); }
   function sanitizePattern(p){ p=String(p||'workdays').toLowerCase(); return DAY_PATTERNS.includes(p)?p:'workdays'; }
 
-  // Convert {hour,minute} in LOCAL to UTC hour/minute, using browser TZ
-  function localHMtoUTC({hour, minute}){
-    const now = new Date();
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
-    return { hour: d.getUTCHours(), minute: d.getUTCMinutes() };
-  }
-  // Convert {hour,minute} in UTC to LOCAL hour/minute
-  function utcHMtoLocal({hour, minute}){
-    const d = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate(), hour, minute, 0, 0));
-    return { hour: d.getHours(), minute: d.getMinutes() };
-  }
-
   function tryParseJSONish(input){
     if(typeof input!=='string') return null;
-    // First try JSON.parse as-is
     try{ return JSON.parse(input); }catch{}
-    // Convert Python-style single quotes and dict/list into JSON
-    // - Replace single quotes with double quotes for simple strings/keys
-    // - Ensure true/false/null variants if present (not typical here)
     let s = input.trim();
-    // Quick sanity: should start with [ or { and contain quotes
     if(!(s.startsWith('[') || s.startsWith('{'))) return null;
-    // Replace single quotes around keys/strings with double quotes.
-    // This is a heuristic that works for the feeder schedule shapes.
     s = s
-      .replace(/'/g, '"')                // single -> double quotes
-      .replace(/\bNone\b/g, 'null')      // Python None -> null
-      .replace(/\bTrue\b/g, 'true')      // Python True -> true
-      .replace(/\bFalse\b/g, 'false');   // Python False -> false
+      .replace(/'/g, '"')
+      .replace(/\bNone\b/g, 'null')
+      .replace(/\bTrue\b/g, 'true')
+      .replace(/\bFalse\b/g, 'false');
     try{ return JSON.parse(s); }catch{ return null; }
   }
 
@@ -80,13 +55,12 @@
         this._injectStyles();
         this._render();
       }
-      // Auto-load on first hass bind and whenever the schedule_entity changes value
       this._maybeLoadFromEntity();
     }
 
-    getCardSize(){ return 6; }
+    getCardSize(){ return 5; }
 
-    // ---------- Styles (Mealplan-ish) ----------
+    // ---------- Styles (Lovelace-like) ----------
     _injectStyles(){
       const style = document.createElement('style');
       style.textContent = `
@@ -94,21 +68,27 @@
         .card{ padding:16px; }
         .header{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
         .title{ margin:0; font: 600 20px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-        .sub{ color: var(--secondary-text-color); font-size:.9rem; }
         .toolbar{ display:flex; gap:8px; align-items:center; }
         .rows{ display:flex; flex-direction:column; gap:12px; margin-top:12px; }
-        .row{ border:1px solid var(--divider-color); border-radius:12px; padding:12px; display:grid; grid-template-columns: 1.1fr 0.7fr 0.6fr auto; gap:10px; align-items:center; }
-        .row select, .row input{ width:100%; padding:8px 10px; border-radius:10px; border:1px solid var(--divider-color); background: var(--card-background-color); }
-        .row .remove{ justify-self:end; }
-        .btn{ border:none; border-radius:10px; padding:8px 12px; cursor:pointer; font:inherit; }
+        .row{ border:1px solid var(--ha-card-border-color, var(--divider-color)); border-radius:12px; padding:12px; display:grid;
+              grid-template-columns: 1.2fr 0.9fr 0.7fr auto; gap:10px; align-items:center; }
+        select, input[type="number"], input[type="time"]{
+          width:100%; padding:10px 12px; border-radius:8px;
+          border:1px solid var(--ha-card-border-color, var(--divider-color));
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+          box-sizing: border-box;
+          font: inherit;
+        }
+        select:focus, input[type="number"]:focus, input[type="time"]:focus{
+          outline: 2px solid var(--primary-color);
+          border-color: var(--primary-color);
+        }
+        .btn{ border:none; border-radius:8px; padding:10px 12px; cursor:pointer; font:inherit; }
         .btn.primary{ background: var(--primary-color); color:#fff; }
-        .btn.ghost{ background: transparent; color: var(--primary-color); border:1px solid var(--primary-color); }
-        .btn.secondary{ background: var(--secondary-text-color); color: var(--primary-text-color); }
-        .hint{ color: var(--secondary-text-color); font-size:.9rem; }
-        .list{ margin-top:4px; font-size:.95rem; }
-        .list .chip{ display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background: var(--ha-card-background, rgba(0,0,0,.04)); border:1px solid var(--divider-color); margin: 4px 6px 0 0; }
-        .line{ height:1px; background: var(--divider-color); margin: 12px 0; }
-        .message{ font-size:.9rem; }
+        .btn.secondary{ background: var(--secondary-text-color); color: var(--card-background-color); }
+        .btn:disabled{ opacity:.6; cursor: default; }
+        .message{ font-size:.9rem; margin-top:8px; }
         .error{ color:#b00020; }
         .ok{ color: var(--success-color, #138000); }
       `;
@@ -124,44 +104,20 @@
 
       // Header
       const header = document.createElement('div'); header.className='header';
-      const hleft = document.createElement('div');
       const title = document.createElement('h1'); title.className='title'; title.textContent = this._config.title;
-      const sub = document.createElement('div'); sub.className='sub'; sub.textContent = this._config.convert_times_to_utc ? 'Times are saved as UTC' : 'Times are saved as local';
-      hleft.append(title, sub);
       const tools = document.createElement('div'); tools.className='toolbar';
-      const addBtn = this._btn('ghost','+ Add', ()=> this._addRow());
+      const addBtn = this._btn('secondary','+ Add', ()=> this._addRow());
       const saveBtn = this._btn('primary', this._state.saving? 'Saving…':'Save', ()=> this._save());
       saveBtn.disabled = this._state.saving || this._state.rows.length===0;
       tools.append(addBtn, saveBtn);
-      header.append(hleft, tools);
+      header.append(title, tools);
       wrap.appendChild(header);
 
-      // Existing schedule (overview chips)
-      const overview = document.createElement('div'); overview.className='list';
-      if(!this._state.rows.length){
-        overview.appendChild(this._el('div',{className:'hint'}, this._state.loadedOnce ? 'No schedule.' : (this._config.schedule_entity? 'Loading…' : 'Add rows to create a schedule.')));
-      } else {
-        // group by pattern for quick glance
-        const groups = {};
-        this._state.rows.forEach(r=>{
-          const key = r.pattern;
-          if(!groups[key]) groups[key] = [];
-          groups[key].push(r);
-        });
-        Object.keys(groups).forEach(p=>{
-          const tag = document.createElement('div'); tag.className='chip';
-          const label = p.toUpperCase();
-          const times = groups[p].map(x=> `${String(x.hour).padStart(2,'0')}:${String(x.minute).padStart(2,'0')}×${x.size}`).join(', ');
-          tag.textContent = `${label}: ${times}`;
-          overview.appendChild(tag);
-        });
-      }
-      wrap.appendChild(overview);
-
-      wrap.appendChild(this._div('line'));
-
-      // Rows editor
+      // Rows editor only (no summary or subtitle)
       const rowsWrap = document.createElement('div'); rowsWrap.className='rows';
+      if(!this._state.rows.length){
+        rowsWrap.appendChild(this._el('div',{className:'message'}, this._config.schedule_entity ? (this._state.loadedOnce?'No schedule yet.':'Loading…') : 'Add rows to create a schedule.'));
+      }
       this._state.rows.forEach((row, idx)=> rowsWrap.appendChild(this._renderRow(row, idx)));
       wrap.appendChild(rowsWrap);
 
@@ -174,10 +130,10 @@
     }
 
     _renderRow(row, idx){
-      const el = this._div('row');
+      const el = document.createElement('div'); el.className='row';
       // pattern
       const sel = document.createElement('select');
-      DAY_PATTERNS.forEach(p=>{ const o=document.createElement('option'); o.value=p; o.textContent=p.toUpperCase(); if(p===row.pattern) o.selected=true; sel.appendChild(o); });
+      DAY_PATTERNS.forEach(p=>{ const o=document.createElement('option'); o.value=p; o.textContent=p; if(p===row.pattern) o.selected=true; sel.appendChild(o); });
       sel.addEventListener('change',(e)=> this._patchRow(idx, { pattern: e.target.value }));
 
       // time (HH:MM)
@@ -190,13 +146,13 @@
       const size = document.createElement('input'); size.type='number'; size.min='1'; size.max='20'; size.step='1'; size.value=String(row.size||1);
       size.addEventListener('change',(e)=> this._patchRow(idx, { size: clampInt(e.target.value,1,20) }));
 
-      const remove = this._btn('secondary','Remove',()=> this._removeRow(idx)); remove.classList.add('remove');
+      const remove = this._btn('', 'Remove',()=> this._removeRow(idx)); remove.classList.add('remove');
 
       el.append(sel, time, size, remove);
       return el;
     }
 
-    // ---------- Entity loading ----------
+    // ---------- Entity loading (local time only) ----------
     _maybeLoadFromEntity(){
       try{
         const ent = this._config.schedule_entity;
@@ -218,13 +174,12 @@
       if (Array.isArray(fromAttr)) {
         return this._postProcessRows(fromAttr);
       }
-      // try JSON from state
+      // try JSON from state (may be single-quoted Python-ish)
       let parsed = tryParseJSONish(st.state);
       if(parsed && typeof parsed==='object'){
         let raw = parsed[key] ?? parsed;
         if (Array.isArray(raw)) return this._postProcessRows(raw);
       }
-      // If attribute is a string JSON-ish, try parse too
       if(typeof fromAttr === 'string'){
         parsed = tryParseJSONish(fromAttr);
         if(parsed && Array.isArray(parsed)) return this._postProcessRows(parsed);
@@ -234,14 +189,10 @@
     }
 
     _postProcessRows(arr){
-      let rows = arr.map(r=>({ pattern: sanitizePattern(r.days||r.pattern||'workdays'),
-                               hour: clampInt(r.hour??8,0,23),
-                               minute: clampInt(r.minute??0,0,59),
-                               size: clampInt(r.size??this._config.default_size??1,1,20)}));
-      if(this._config.schedule_times_are_utc){
-        rows = rows.map(r=>{ const hm = utcHMtoLocal({hour:r.hour, minute:r.minute}); return {...r, hour: hm.hour, minute: hm.minute}; });
-      }
-      return rows;
+      return arr.map(r=>({ pattern: sanitizePattern(r.days||r.pattern||'workdays'),
+                           hour: clampInt(r.hour??8,0,23),
+                           minute: clampInt(r.minute??0,0,59),
+                           size: clampInt(r.size??this._config.default_size??1,1,20)}));
     }
 
     // ---------- Data ----------
@@ -252,13 +203,10 @@
     _buildPayload(){
       const key = this._config.schedule_key || 'schedule';
       if(!this._state.rows.length) throw new Error('No schedule rows');
-      const rowsRaw = this._state.rows.map(r=>({ days: sanitizePattern(r.pattern),
-                                                 hour: clampInt(r.hour,0,23),
-                                                 minute: clampInt(r.minute,0,59),
-                                                 size: clampInt(r.size,1,20)}));
-      const rows = this._config.convert_times_to_utc
-        ? rowsRaw.map(r=>{ const hm = localHMtoUTC({hour:r.hour, minute:r.minute}); return {...r, hour: hm.hour, minute: hm.minute}; })
-        : rowsRaw;
+      const rows = this._state.rows.map(r=>({ days: sanitizePattern(r.pattern),
+                                              hour: clampInt(r.hour,0,23),
+                                              minute: clampInt(r.minute,0,59),
+                                              size: clampInt(r.size,1,20)}));
       return { [key]: rows };
     }
 
@@ -277,16 +225,15 @@
     }
 
     // ---------- UX helpers ----------
-    _div(cls){ const d=document.createElement('div'); d.className=cls; return d; }
-    _el(tag, props={}, text){ const el=document.createElement(tag); Object.assign(el, props); if(text!=null) el.textContent=text; return el; }
     _btn(kind, text, onClick){ const b=document.createElement('button'); b.className=`btn ${kind}`; b.textContent=text; b.addEventListener('click', onClick); return b; }
+    _el(tag, props={}, text){ const el=document.createElement(tag); Object.assign(el, props); if(text!=null) el.textContent=text; return el; }
     _msg(s){ this._state.msg = s; this._state.err = null; }
     _err(s){ this._state.err = s; this._state.msg = null; }
   }
 
   customElements.define('cat-feeder-mealplan-card', MealplanStyleFeederCard);
 
-  // Minimal editor (unchanged)
+  // Minimal editor
   class MealplanFeederEditor extends HTMLElement{
     setConfig(config){ this._config = Object.assign({}, DEFAULTS, config||{}); this._render(); }
     set hass(hass){ this._hass=hass; }
@@ -297,7 +244,8 @@
         <style>
           .wrap{ display:grid; grid-template-columns: 1.2fr 1fr; gap:12px; }
           label{ display:flex; flex-direction:column; gap:6px; font-size:.9rem; }
-          input, select{ padding:8px 10px; border-radius:10px; border:1px solid var(--divider-color); background: var(--card-background-color); }
+          input, select{ padding:10px 12px; border-radius:8px; border:1px solid var(--ha-card-border-color, var(--divider-color)); background: var(--card-background-color); }
+          input:focus, select:focus{ outline: 2px solid var(--primary-color); border-color: var(--primary-color); }
           .full{ grid-column: 1/-1; }
         </style>
         <div class="wrap">
@@ -305,14 +253,6 @@
           ${this._field('MQTT topic (required)','mqtt_topic', c.mqtt_topic, 'zigbee2mqtt/feeder/set', true)}
           ${this._field('Schedule entity (optional)','schedule_entity', c.schedule_entity, 'sensor.feeder_schedule')}
           ${this._field('Schedule key','schedule_key', c.schedule_key||'schedule')}
-          <label>Convert times to UTC on save<select id="to_utc">
-            <option value="true" ${c.convert_times_to_utc!==false?'selected':''}>Yes</option>
-            <option value="false" ${c.convert_times_to_utc===false?'selected':''}>No</option>
-          </select></label>
-          <label>Loaded schedule times are UTC?<select id="is_utc">
-            <option value="true" ${c.schedule_times_are_utc!==false?'selected':''}>Yes</option>
-            <option value="false" ${c.schedule_times_are_utc===false?'selected':''}>No</option>
-          </select></label>
         </div>
       `;
       const emit = () => this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: this._collect() }, bubbles:true, composed:true }));
@@ -325,21 +265,18 @@
     }
     _collect(){
       const v = (key)=> (this.shadowRoot.querySelector(`input[data-key="${key}"]`)||{}).value || '';
-      const cfg = {
+      return {
         type: 'custom:cat-feeder-mealplan-card',
         title: v('title') || DEFAULTS.title,
         mqtt_topic: v('mqtt_topic'),
         schedule_entity: v('schedule_entity'),
         schedule_key: v('schedule_key') || 'schedule',
-        convert_times_to_utc: (this.shadowRoot.getElementById('to_utc')||{value:'true'}).value==='true',
-        schedule_times_are_utc: (this.shadowRoot.getElementById('is_utc')||{value:'true'}).value==='true',
       };
-      return cfg;
     }
   }
   customElements.define('cat-feeder-mealplan-card-editor', MealplanFeederEditor);
 
   // Register for card picker
   window.customCards = window.customCards || [];
-  window.customCards.push({ type: 'cat-feeder-mealplan-card', name: 'Cat Feeder (Mealplan-style)', description: 'Schedule editor styled like mealplan; UTC-aware.' });
+  window.customCards.push({ type: 'cat-feeder-mealplan-card', name: 'Cat Feeder (Mealplan-style)', description: 'Schedule editor styled like mealplan; local time only.' });
 })();
